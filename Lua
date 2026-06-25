@@ -3072,6 +3072,344 @@ do
     end);
 end;
 
+-- < Weather / particle effects >
+-- A small particle system for cosmetic effects (Snow, Rain, Lightning) that can
+-- render either inside the menu window only, or across the whole screen.
+-- Library:SetWeatherEffect('Snow' | 'Rain' | 'Lightning' | 'None')
+-- Library:SetWeatherScope('UI' | 'Screen')
+do
+    -- Screen-wide layer: sits above everything, ignores the menu's own fade.
+    local ScreenLayer = Library:Create('Frame', {
+        BackgroundTransparency = 1;
+        ClipsDescendants = true;
+        Size = UDim2.fromScale(1, 1);
+        ZIndex = 1000;
+        Visible = false;
+        Parent = ScreenGui;
+    });
+
+    -- UI-scoped layer: gets parented under the active window's Outer frame
+    -- once a window exists, so it's clipped to the menu and fades with it.
+    local UILayer = Library:Create('Frame', {
+        BackgroundTransparency = 1;
+        ClipsDescendants = true;
+        Size = UDim2.fromScale(1, 1);
+        ZIndex = 50;
+        Visible = false;
+        Parent = ScreenGui; -- re-parented to the window once CreateWindow runs
+    });
+
+    local LightningFlash = Library:Create('Frame', {
+        BackgroundColor3 = Color3.new(1, 1, 1);
+        BackgroundTransparency = 1;
+        Size = UDim2.fromScale(1, 1);
+        ZIndex = 1001;
+        Parent = ScreenLayer;
+    });
+
+    Library.WeatherScreenLayer = ScreenLayer;
+    Library.WeatherUILayer = UILayer;
+
+    Library.WeatherEffect = 'None';
+    Library.WeatherScope = 'UI';
+
+    local ActiveParticles = {};
+    local WeatherRunning = false;
+    local CurrentToken = 0;
+
+    local function GetActiveLayer()
+        return Library.WeatherScope == 'Screen' and ScreenLayer or UILayer;
+    end;
+
+    local function ClearParticles()
+        for _, P in next, ActiveParticles do
+            if P and P.Parent then
+                P:Destroy();
+            end;
+        end;
+        ActiveParticles = {};
+    end;
+
+    local function GetLayerSize(Layer)
+        local Size = Layer.AbsoluteSize;
+        if Size.X <= 0 or Size.Y <= 0 then
+            return Vector2.new(workspace.CurrentCamera.ViewportSize.X, workspace.CurrentCamera.ViewportSize.Y);
+        end;
+        return Size;
+    end;
+
+    local function SpawnSnowflake(Layer)
+        local Size = math.random(2, 4);
+
+        local Flake = Library:Create('Frame', {
+            BackgroundColor3 = Color3.new(1, 1, 1);
+            BackgroundTransparency = math.random(10, 40) / 100;
+            BorderSizePixel = 0;
+            Size = UDim2.fromOffset(Size, Size);
+            ZIndex = Layer.ZIndex + 1;
+            Parent = Layer;
+        });
+
+        Library:Create('UICorner', { CornerRadius = UDim.new(1, 0); Parent = Flake; });
+
+        return Flake;
+    end;
+
+    local function SpawnRainDrop(Layer)
+        local Drop = Library:Create('Frame', {
+            BackgroundColor3 = Color3.fromRGB(170, 200, 255);
+            BackgroundTransparency = math.random(30, 55) / 100;
+            BorderSizePixel = 0;
+            Size = UDim2.fromOffset(2, math.random(10, 18));
+            ZIndex = Layer.ZIndex + 1;
+            Parent = Layer;
+        });
+
+        return Drop;
+    end;
+
+    -- Snow: gentle falling + side drift, looping per-flake.
+    local function RunSnow(Token, Layer)
+        task.spawn(function()
+            while CurrentToken == Token do
+                if #ActiveParticles < 60 then
+                    local LayerSize = GetLayerSize(Layer);
+                    local Flake = SpawnSnowflake(Layer);
+                    local StartX = math.random(0, math.max(0, LayerSize.X));
+
+                    Flake.Position = UDim2.fromOffset(StartX, -10);
+                    table.insert(ActiveParticles, Flake);
+
+                    task.spawn(function()
+                        local Drift = math.random(-20, 20);
+                        local Duration = math.random(40, 80) / 10;
+                        local FallDistance = LayerSize.Y + 20;
+
+                        local Elapsed = 0;
+                        while Flake.Parent and CurrentToken == Token do
+                            local Dt = RenderStepped:Wait();
+                            Elapsed = Elapsed + Dt;
+
+                            local Alpha = math.clamp(Elapsed / Duration, 0, 1);
+                            Flake.Position = UDim2.fromOffset(
+                                StartX + Drift * math.sin(Alpha * math.pi * 2),
+                                -10 + (FallDistance * Alpha)
+                            );
+
+                            if Alpha >= 1 then
+                                break;
+                            end;
+                        end;
+
+                        if Flake.Parent then
+                            Flake:Destroy();
+                        end;
+
+                        for i = #ActiveParticles, 1, -1 do
+                            if ActiveParticles[i] == Flake then
+                                table.remove(ActiveParticles, i);
+                                break;
+                            end;
+                        end;
+                    end);
+                end;
+
+                task.wait(0.08);
+            end;
+        end);
+    end;
+
+    -- Rain: fast straight-down streaks, denser than snow.
+    local function RunRain(Token, Layer)
+        task.spawn(function()
+            while CurrentToken == Token do
+                if #ActiveParticles < 80 then
+                    local LayerSize = GetLayerSize(Layer);
+                    local Drop = SpawnRainDrop(Layer);
+                    local StartX = math.random(0, math.max(0, LayerSize.X));
+
+                    Drop.Position = UDim2.fromOffset(StartX, -20);
+                    table.insert(ActiveParticles, Drop);
+
+                    task.spawn(function()
+                        local Duration = math.random(5, 9) / 10;
+                        local FallDistance = LayerSize.Y + 40;
+                        local Elapsed = 0;
+
+                        while Drop.Parent and CurrentToken == Token do
+                            local Dt = RenderStepped:Wait();
+                            Elapsed = Elapsed + Dt;
+
+                            local Alpha = math.clamp(Elapsed / Duration, 0, 1);
+                            Drop.Position = UDim2.fromOffset(StartX, -20 + (FallDistance * Alpha));
+
+                            if Alpha >= 1 then
+                                break;
+                            end;
+                        end;
+
+                        if Drop.Parent then
+                            Drop:Destroy();
+                        end;
+
+                        for i = #ActiveParticles, 1, -1 do
+                            if ActiveParticles[i] == Drop then
+                                table.remove(ActiveParticles, i);
+                                break;
+                            end;
+                        end;
+                    end);
+                end;
+
+                task.wait(0.025);
+            end;
+        end);
+    end;
+
+    -- Lightning: occasional full-layer white flash plus a brief jagged bolt.
+    local function RunLightning(Token, Layer)
+        task.spawn(function()
+            while CurrentToken == Token do
+                task.wait(math.random(25, 60) / 10);
+
+                if CurrentToken ~= Token then
+                    break;
+                end;
+
+                local Flash = Library:Create('Frame', {
+                    BackgroundColor3 = Color3.new(1, 1, 1);
+                    BackgroundTransparency = 1;
+                    Size = UDim2.fromScale(1, 1);
+                    ZIndex = Layer.ZIndex + 5;
+                    Parent = Layer;
+                });
+
+                table.insert(ActiveParticles, Flash);
+
+                TweenService:Create(Flash, TweenInfo.new(0.05, Enum.EasingStyle.Linear), { BackgroundTransparency = 0.55 }):Play();
+                task.wait(0.05);
+                TweenService:Create(Flash, TweenInfo.new(0.25, Enum.EasingStyle.Quad), { BackgroundTransparency = 1 }):Play();
+                task.wait(0.25);
+
+                if Flash.Parent then
+                    Flash:Destroy();
+                end;
+
+                for i = #ActiveParticles, 1, -1 do
+                    if ActiveParticles[i] == Flash then
+                        table.remove(ActiveParticles, i);
+                        break;
+                    end;
+                end;
+            end;
+        end);
+    end;
+
+    local function StopWeather()
+        CurrentToken = CurrentToken + 1;
+        WeatherRunning = false;
+        ClearParticles();
+        ScreenLayer.Visible = false;
+        UILayer.Visible = false;
+    end;
+
+    local function StartWeather()
+        CurrentToken = CurrentToken + 1;
+        local Token = CurrentToken;
+        local Layer = GetActiveLayer();
+
+        ClearParticles();
+        ScreenLayer.Visible = (Library.WeatherScope == 'Screen') and (Library.WeatherEffect ~= 'None');
+        UILayer.Visible = (Library.WeatherScope == 'UI') and (Library.WeatherEffect ~= 'None');
+
+        if Library.WeatherEffect == 'Snow' then
+            RunSnow(Token, Layer);
+        elseif Library.WeatherEffect == 'Rain' then
+            RunRain(Token, Layer);
+        elseif Library.WeatherEffect == 'Lightning' then
+            RunLightning(Token, Layer);
+        end;
+
+        WeatherRunning = Library.WeatherEffect ~= 'None';
+    end;
+
+    function Library:SetWeatherEffect(Name)
+        if Name ~= 'None' and Name ~= 'Snow' and Name ~= 'Rain' and Name ~= 'Lightning' then
+            return;
+        end;
+
+        Library.WeatherEffect = Name;
+
+        if Name == 'None' then
+            StopWeather();
+        else
+            StartWeather();
+        end;
+    end;
+
+    function Library:SetWeatherScope(Scope)
+        if Scope ~= 'UI' and Scope ~= 'Screen' then
+            return;
+        end;
+
+        Library.WeatherScope = Scope;
+
+        if Library.WeatherEffect ~= 'None' then
+            StartWeather(); -- restart on the newly-selected layer
+        end;
+    end;
+
+    -- Called once a window exists so the UI-scoped layer is actually inside it.
+    function Library:_AttachWeatherToWindow(WindowOuter)
+        UILayer.Parent = WindowOuter;
+        UILayer.ZIndex = 50;
+    end;
+end;
+
+-- < Colored open/close glow >
+-- A brief colored flash (defaults to AccentColor) that plays alongside the
+-- existing fade whenever the menu opens or closes, for a more "alive" feel.
+do
+    local GlowFrame = Library:Create('Frame', {
+        BackgroundColor3 = Library.AccentColor;
+        BackgroundTransparency = 1;
+        Size = UDim2.fromScale(1, 1);
+        ZIndex = 999;
+        Visible = false;
+        Parent = ScreenGui;
+    });
+
+    Library:AddToRegistry(GlowFrame, { BackgroundColor3 = 'AccentColor' });
+
+    Library.GlowFrame = GlowFrame;
+    Library.GlowEnabled = true;
+
+    function Library:SetGlowEnabled(Bool)
+        Library.GlowEnabled = Bool;
+    end;
+
+    function Library:SetGlowColor(Color)
+        GlowFrame.BackgroundColor3 = Color;
+        Library:RemoveFromRegistry(GlowFrame);
+        Library:AddToRegistry(GlowFrame, { BackgroundColor3 = Color });
+    end;
+
+    function Library:PlayOpenCloseGlow()
+        if not Library.GlowEnabled then
+            return;
+        end;
+
+        GlowFrame.Visible = true;
+        GlowFrame.BackgroundTransparency = 0.75;
+
+        TweenService:Create(GlowFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad), { BackgroundTransparency = 1 }):Play();
+
+        task.delay(0.2, function()
+            GlowFrame.Visible = false;
+        end);
+    end;
+end;
+
 function Library:SetWatermarkVisibility(Bool)
     Library.Watermark.Visible = Bool;
 end;
@@ -3215,6 +3553,10 @@ function Library:CreateWindow(...)
 
     Library:MakeDraggable(Outer, 25);
 
+    if Library._AttachWeatherToWindow then
+        Library:_AttachWeatherToWindow(Outer);
+    end;
+
     -- UIScale lets the Advanced settings panel resize the whole menu live (useful on small/mobile screens)
     local WindowScale = Library:Create('UIScale', {
         Scale = 1;
@@ -3296,12 +3638,24 @@ function Library:CreateWindow(...)
         BackgroundColor3 = 'BackgroundColor';
     });
 
-    local TabArea = Library:Create('Frame', {
+    local TabArea = Library:Create('ScrollingFrame', {
         BackgroundTransparency = 1;
+        BorderSizePixel = 0;
         Position = UDim2.new(0, 8, 0, 8);
         Size = UDim2.new(1, -16, 0, 21);
+        CanvasSize = UDim2.new(0, 0, 0, 0);
+        ScrollingDirection = Enum.ScrollingDirection.X;
+        AutomaticCanvasSize = Enum.AutomaticSize.X;
+        TopImage = '';
+        BottomImage = '';
+        ScrollBarThickness = 3;
+        ScrollBarImageColor3 = Library.AccentColor;
         ZIndex = 1;
         Parent = MainSectionInner;
+    });
+
+    Library:AddToRegistry(TabArea, {
+        ScrollBarImageColor3 = 'AccentColor';
     });
 
     local TabListLayout = Library:Create('UIListLayout', {
@@ -3788,6 +4142,10 @@ function Library:CreateWindow(...)
         Fading = true;
         Toggled = (not Toggled);
         ModalElement.Modal = Toggled;
+
+        if Library.PlayOpenCloseGlow then
+            Library:PlayOpenCloseGlow();
+        end;
 
         if Toggled then
             -- A bit scuffed, but if we're going from not toggled -> toggled we want to show the frame immediately so that the fade is visible.
