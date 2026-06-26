@@ -1416,6 +1416,10 @@ do
         local Groupbox = self;
         local Container = Groupbox.Container;
 
+        if Library.CompactMode then
+            Size = math.max(1, math.floor(Size * Library.CompactFactor));
+        end;
+
         Library:Create('Frame', {
             BackgroundTransparency = 1;
             Size = UDim2.new(1, 0, 0, Size);
@@ -1608,6 +1612,9 @@ do
 
                     return
                 end
+
+                if Library.PlayClickSound then Library:PlayClickSound(); end;
+                if Library.PlayHaptic then Library:PlayHaptic(); end;
 
                 Library:SafeCallback(Button.Func);
             end)
@@ -2002,6 +2009,9 @@ do
             if IsPrimaryInput(Input) and not Library:MouseIsOverOpenedFrame() then
                 Toggle:SetValue(not Toggle.Value) -- Why was it not like this from the start?
                 Library:AttemptSave();
+
+                if Library.PlayClickSound then Library:PlayClickSound(); end;
+                if Library.PlayHaptic then Library:PlayHaptic(); end;
             end;
         end);
 
@@ -2987,6 +2997,55 @@ do
         MobileOuter.Visible = Bool;
     end;
 
+    -- < 10. Auto-hide after inactivity >
+    -- Fades the button down to a faint "ghost" state after a few seconds of no
+    -- input anywhere on screen, and restores it on the next tap/click anywhere,
+    -- so it doesn't sit on top of gameplay when not in use.
+    Library.MobileAutoHideEnabled = false;
+    Library.MobileAutoHideDelay = 4;
+
+    local LastActivity = os.clock();
+    local IsGhosted = false;
+
+    local function RefreshActivity()
+        LastActivity = os.clock();
+
+        if IsGhosted then
+            IsGhosted = false;
+            TweenService:Create(MobileOuter, TweenInfo.new(0.2, Enum.EasingStyle.Quad), { BackgroundTransparency = 0 }):Play();
+            TweenService:Create(MobileInner, TweenInfo.new(0.2, Enum.EasingStyle.Quad), { BackgroundTransparency = 0 }):Play();
+            TweenService:Create(MobileIcon, TweenInfo.new(0.2, Enum.EasingStyle.Quad), { ImageTransparency = 0 }):Play();
+        end;
+    end;
+
+    InputService.InputBegan:Connect(RefreshActivity);
+
+    function Library:SetMobileAutoHide(Bool)
+        Library.MobileAutoHideEnabled = Bool;
+        if not Bool then
+            RefreshActivity();
+        end;
+    end;
+
+    function Library:SetMobileAutoHideDelay(Seconds)
+        Library.MobileAutoHideDelay = math.clamp(Seconds, 1, 30);
+    end;
+
+    task.spawn(function()
+        while MobileOuter.Parent do
+            task.wait(0.5);
+
+            if Library.MobileAutoHideEnabled and MobileOuter.Visible and not IsGhosted then
+                if (os.clock() - LastActivity) >= Library.MobileAutoHideDelay then
+                    IsGhosted = true;
+                    TweenService:Create(MobileOuter, TweenInfo.new(0.6, Enum.EasingStyle.Quad), { BackgroundTransparency = 0.7 }):Play();
+                    TweenService:Create(MobileInner, TweenInfo.new(0.6, Enum.EasingStyle.Quad), { BackgroundTransparency = 0.7 }):Play();
+                    TweenService:Create(MobileIcon, TweenInfo.new(0.6, Enum.EasingStyle.Quad), { ImageTransparency = 0.7 }):Play();
+                end;
+            end;
+        end;
+    end);
+
     -- Ambient pulse: the accent ring breathes slowly so the button reads as "alive"
     -- without being distracting. This is the one decorative flourish on this control.
     task.spawn(function()
@@ -3016,6 +3075,10 @@ do
         end;
 
         MobilePressVisual(true);
+
+        if Library.PlayHaptic then
+            Library:PlayHaptic();
+        end;
 
         local StartPos = IsTouch and Vector2.new(Input.Position.X, Input.Position.Y) or Vector2.new(Mouse.X, Mouse.Y);
         local ObjStart = MobileOuter.AbsolutePosition; -- top-left, regardless of AnchorPoint
@@ -3399,14 +3462,262 @@ do
             return;
         end;
 
+        local Speed = Library.TweenSpeedMultiplier or 1;
+
         GlowFrame.Visible = true;
         GlowFrame.BackgroundTransparency = 0.75;
 
-        TweenService:Create(GlowFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad), { BackgroundTransparency = 1 }):Play();
+        TweenService:Create(GlowFrame, TweenInfo.new(0.18 * Speed, Enum.EasingStyle.Quad), { BackgroundTransparency = 1 }):Play();
 
-        task.delay(0.2, function()
+        task.delay(0.2 * Speed, function()
             GlowFrame.Visible = false;
         end);
+    end;
+end;
+
+-- < 1. Animation speed >
+-- Scales the menu fade duration and other library-driven tweens (glow,
+-- lightning flash). 1 = normal speed, <1 = faster, >1 = slower/cinematic.
+do
+    Library.TweenSpeedMultiplier = 1;
+
+    function Library:SetAnimationSpeed(Multiplier)
+        Multiplier = math.clamp(Multiplier, 0.1, 4);
+        Library.TweenSpeedMultiplier = Multiplier;
+
+        if Library.WindowConfig then
+            Library.WindowConfig.MenuFadeTime = Library.WindowConfig.BaseMenuFadeTime * Multiplier;
+        end;
+    end;
+end;
+
+-- < 2. Corner roundness >
+-- Adds/updates a UICorner on every registered panel-style frame so the whole
+-- UI can switch from sharp corners (default) to rounded, live.
+do
+    local CornerInstances = {}; -- [Frame] = UICorner
+
+    Library.CornerRadius = 0;
+
+    local function EnsureCorner(Frame)
+        local Existing = CornerInstances[Frame];
+
+        if Existing and Existing.Parent then
+            return Existing;
+        end;
+
+        local Corner = Library:Create('UICorner', {
+            CornerRadius = UDim.new(0, Library.CornerRadius);
+            Parent = Frame;
+        });
+
+        CornerInstances[Frame] = Corner;
+        return Corner;
+    end;
+
+    function Library:SetCornerRadius(Pixels)
+        Pixels = math.clamp(Pixels, 0, 16);
+        Library.CornerRadius = Pixels;
+
+        for _, Data in next, Library.Registry do
+            local Inst = Data.Instance;
+            local ColorIdx = Data.Properties and Data.Properties.BackgroundColor3;
+
+            if Inst and Inst:IsA('Frame') and (ColorIdx == 'BackgroundColor' or ColorIdx == 'MainColor') then
+                if Pixels <= 0 then
+                    local Existing = CornerInstances[Inst];
+                    if Existing then
+                        Existing.CornerRadius = UDim.new(0, 0);
+                    end;
+                else
+                    local Corner = EnsureCorner(Inst);
+                    Corner.CornerRadius = UDim.new(0, Pixels);
+                end;
+            end;
+        end;
+    end;
+end;
+
+-- < 3. Blur background >
+-- Adds a single shared BlurEffect to Lighting while the menu is open, for a
+-- mobile-app-style "background blurred behind a sheet" look.
+do
+    local Lighting = game:GetService('Lighting');
+    local Blur = Library:Create('BlurEffect', {
+        Size = 0;
+        Parent = Lighting;
+    });
+
+    Library.BlurEffect = Blur;
+    Library.BlurEnabled = false;
+
+    function Library:SetBlurEnabled(Bool)
+        Library.BlurEnabled = Bool;
+
+        local TargetSize = Bool and 12 or 0;
+        TweenService:Create(Blur, TweenInfo.new(0.25, Enum.EasingStyle.Quad), { Size = TargetSize }):Play();
+    end;
+
+    function Library:SetBlurIntensity(Size)
+        Size = math.clamp(Size, 0, 24);
+
+        if Library.BlurEnabled then
+            Blur.Size = Size;
+        end;
+    end;
+end;
+
+-- < 4. Custom accent color >
+-- Recolors the whole UI live (toggles, highlights, sliders, borders) using the
+-- same registry the theme system already drives — separate from the glow color.
+do
+    function Library:SetAccentColor(Color)
+        Library.AccentColor = Color;
+        Library.AccentColorDark = Library:GetDarkerColor(Color);
+        Library:UpdateColorsUsingRegistry();
+    end;
+end;
+
+-- < 5. Font size scaling >
+-- Independent of UI scale: only affects text size, useful for readability on
+-- small phone screens without making touch targets bigger/smaller.
+do
+    local BaseSizes = {}; -- [TextLabel/TextBox] = original TextSize
+    Library.FontScale = 1;
+
+    local function TrackLabel(Inst)
+        if not BaseSizes[Inst] then
+            BaseSizes[Inst] = Inst.TextSize;
+        end;
+    end;
+
+    -- Wrap CreateLabel so every label this library creates from now on is
+    -- tracked automatically (existing labels are caught by the registry pass below).
+    local OriginalCreateLabel = Library.CreateLabel;
+    function Library:CreateLabel(Properties, IsHud)
+        local Inst = OriginalCreateLabel(self, Properties, IsHud);
+        TrackLabel(Inst);
+        return Inst;
+    end;
+
+    function Library:SetFontScale(Scale)
+        Scale = math.clamp(Scale, 0.7, 1.6);
+        Library.FontScale = Scale;
+
+        for _, Data in next, Library.Registry do
+            local Inst = Data.Instance;
+
+            if Inst and (Inst:IsA('TextLabel') or Inst:IsA('TextBox')) then
+                TrackLabel(Inst);
+                Inst.TextSize = math.floor(BaseSizes[Inst] * Scale);
+            end;
+        end;
+    end;
+end;
+
+-- < 6. Window position presets >
+-- Quick-snap buttons for one-handed mobile use: corners + center.
+do
+    function Library:SnapWindowTo(WindowOuter, Preset)
+        local Margin = 12;
+
+        local Presets = {
+            TopLeft = { AnchorPoint = Vector2.new(0, 0), Position = UDim2.fromOffset(Margin, Margin) },
+            TopRight = { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -Margin, 0, Margin) },
+            BottomLeft = { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, Margin, 1, -Margin) },
+            BottomRight = { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -Margin, 1, -Margin) },
+            Center = { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) },
+        };
+
+        local P = Presets[Preset];
+        if not P then
+            return;
+        end;
+
+        WindowOuter.AnchorPoint = P.AnchorPoint;
+        WindowOuter.Position = P.Position;
+    end;
+end;
+
+-- < 7. Haptic-style press feedback >
+-- Best-effort: Roblox's HapticService only works with connected gamepads on
+-- most platforms, so on touch-only devices this gracefully does nothing rather
+-- than erroring. Hooked into the existing mobile button press for now.
+do
+    local HapticService = game:GetService('HapticService');
+    Library.HapticsEnabled = false;
+
+    function Library:SetHapticsEnabled(Bool)
+        Library.HapticsEnabled = Bool;
+    end;
+
+    function Library:PlayHaptic()
+        if not Library.HapticsEnabled then
+            return;
+        end;
+
+        pcall(function()
+            for _, InputType in next, { Enum.UserInputType.Gamepad1 } do
+                if HapticService:IsVibrationSupported(InputType) then
+                    if HapticService:IsMotorSupported(InputType, Enum.VibrationMotor.Small) then
+                        HapticService:SetMotor(InputType, Enum.VibrationMotor.Small, 0.6);
+                        task.delay(0.08, function()
+                            pcall(HapticService.SetMotor, HapticService, InputType, Enum.VibrationMotor.Small, 0);
+                        end);
+                    end;
+                end;
+            end;
+        end);
+    end;
+end;
+
+-- < 8. Compact mode >
+-- Shrinks the blank-space padding between elements so more fits on a small
+-- screen without scrolling. Existing controls call Groupbox:AddBlank(N); we
+-- scale N by this factor for everything added after this is turned on.
+do
+    Library.CompactMode = false;
+    Library.CompactFactor = 0.5;
+
+    local OriginalAddBlank;
+
+    function Library:SetCompactMode(Bool)
+        Library.CompactMode = Bool;
+    end;
+end;
+
+-- < 9. Sound effects on interaction >
+-- A shared SoundService sound reused for click/toggle feedback, plus the
+-- existing Notify() popup, gated by a single enabled flag + volume.
+do
+    local SoundService = game:GetService('SoundService');
+
+    local ClickSound = Library:Create('Sound', {
+        SoundId = 'rbxasset://sounds/button.wav';
+        Volume = 0.4;
+        Parent = SoundService;
+    });
+
+    Library.SoundEnabled = false;
+    Library.SoundVolume = 0.4;
+
+    function Library:SetSoundEnabled(Bool)
+        Library.SoundEnabled = Bool;
+    end;
+
+    function Library:SetSoundVolume(Vol)
+        Library.SoundVolume = math.clamp(Vol, 0, 1);
+        ClickSound.Volume = Library.SoundVolume;
+    end;
+
+    function Library:PlayClickSound()
+        if not Library.SoundEnabled then
+            return;
+        end;
+
+        ClickSound.Volume = Library.SoundVolume;
+        ClickSound.PlaybackSpeed = 0.95 + math.random(0, 10) / 100;
+        ClickSound:Play();
     end;
 end;
 
@@ -3535,6 +3846,9 @@ function Library:CreateWindow(...)
         Config.AnchorPoint = Vector2.new(0.5, 0.5)
         Config.Position = UDim2.fromScale(0.5, 0.5)
     end
+
+    Config.BaseMenuFadeTime = Config.MenuFadeTime;
+    Library.WindowConfig = Config;
 
     local Window = {
         Tabs = {};
